@@ -23,15 +23,22 @@ from .utils import bold, LogProgress
 logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser(
-        'denoiser.evaluate',
-        description='Speech enhancement using Demucs - Evaluate model performance')
+    "denoiser.evaluate", description="Speech enhancement using Demucs - Evaluate model performance"
+)
 add_flags(parser)
-parser.add_argument('--data_dir', help='directory including noisy.json and clean.json files')
-parser.add_argument('--matching', default="sort", help='set this to dns for the dns dataset.')
-parser.add_argument('--no_pesq', action="store_false", dest="pesq", default=True,
-                    help="Don't compute PESQ.")
-parser.add_argument('-v', '--verbose', action='store_const', const=logging.DEBUG,
-                    default=logging.INFO, help="More loggging")
+parser.add_argument("--data_dir", help="directory including noisy.json and clean.json files")
+parser.add_argument("--matching", default="sort", help="set this to dns for the dns dataset.")
+parser.add_argument(
+    "--no_pesq", action="store_false", dest="pesq", default=True, help="Don't compute PESQ."
+)
+parser.add_argument(
+    "-v",
+    "--verbose",
+    action="store_const",
+    const=logging.DEBUG,
+    default=logging.INFO,
+    help="More loggging",
+)
 
 
 def evaluate(args, model=None, data_loader=None):
@@ -41,14 +48,91 @@ def evaluate(args, model=None, data_loader=None):
     updates = 5
 
     # Load model
-    if not model:
-        model = pretrained.get_model(args).to(args.device)
+    # if not model:
+    #     model = pretrained.get_model(args).to(args.device)
+    # model.eval()
+
+    model = pretrained.Demucs(
+        hidden=48,
+        depth=4,
+        kernel_size=8,
+        stride=4,
+        causal=True,
+        resample=1,
+        growth=2,
+        max_hidden=10_000,
+        normalize=True,
+        glu=True,
+        rescale=0.1,
+        floor=1e-3,
+    )
+    a = 0
+    for p in model.parameters():
+        a += p.numel()
+    print("model size", a)
     model.eval()
 
     # Load data
     if data_loader is None:
         dataset = NoisyCleanSet(args.data_dir, matching=args.matching, sample_rate=args.sample_rate)
-        data_loader = distrib.loader(dataset, batch_size=1, num_workers=2)
+        # data_loader = distrib.loader(dataset, batch_size=1, num_workers=2)
+    import torch
+
+    x = dataset[0][0]
+    length = x.shape[-1]
+    from torch.nn import functional as F
+
+    x = F.pad(x, (0, model.valid_length(length) - length))  # 222 (before: 81271)
+    # x = F.pad(x, (0, 32_084-len(x)))
+    # x = x.unsqueeze(1)
+    x = x.unsqueeze(1)
+    model(x)
+
+    torch.onnx.export(model, x, "denoiser.onnx", verbose=True, opset_version=11)
+    # from serialization import pytorch_converter
+    # pytorch_converter.convert('denoiser.onnx', image_input_names=None)
+
+    import onnx
+    import onnx_coreml
+
+    m = onnx.load_model("denoiser.onnx")
+    coreml_model = onnx_coreml.convert(m)#, minimum_ios_deployment_target="13")
+
+    # coreml_model.save("denoiser.mlmodel")
+    from serialization import utils
+
+    # preprocess_dict = {
+    #     "divisibleBy" : 32084,
+    #     "resizeStrategy" : "Fixed",
+    #     "sideLength" : 32084,
+    #     "classes" : None,
+    # }
+    # [kDivisibleBy, kResizeStrategy, kSideLength, kClasses]
+    preprocess_dict = utils.create_preprocess_dict(
+        model.valid_length(length), "Fixed", side_length=model.valid_length(length), output_classes="irrelevant"
+    )
+    # utils.compress_file('denoiser.mlmodel', 'denoiser.nnmodel')
+    utils.compress_and_save(
+        coreml_model,
+        ".",
+        "denoiser_48_depth_4",
+        "1.0.0",
+        "",
+        preprocess_dict,
+        "",
+        convert_to_float16=False,
+    )
+    print('length ',model.valid_length(length) )
+    import numpy as np
+
+    inp = torch.from_numpy(np.random.random((1,1,model.valid_length(length)))).float()
+    out1 = coreml_model.predict({"0": inp.numpy()})["138"]
+    out2 = model(inp)
+    np.testing.assert_array_almost_equal(out1.squeeze(), out2.detach().numpy().squeeze())
+
+    import sys
+
+    sys.exit()
     pendings = []
     with ProcessPoolExecutor(args.num_workers) as pool:
         with torch.no_grad():
