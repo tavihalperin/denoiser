@@ -20,7 +20,8 @@ class BLSTM(nn.Module):
     def __init__(self, dim, layers=2, bi=True):
         super().__init__()
         klass = nn.LSTM
-        self.lstm = klass(bidirectional=bi, num_layers=layers, hidden_size=dim, input_size=dim)
+        self.lstm = klass(bidirectional=bi, num_layers=layers, hidden_size=dim, input_size=dim,
+                          batch_first=True)
         self.linear = None
         if bi:
             self.linear = nn.Linear(2 * dim, dim)
@@ -156,16 +157,17 @@ class Demucs(nn.Module):
     def forward(self, mix):
         if mix.dim() == 2:
             mix = mix.unsqueeze(1)
-
+        if mix.dim() == 4:
+            mix = mix.squeeze(1)
         if self.normalize:
             mono = mix.mean(dim=1, keepdim=True)
             std = mono.std(dim=-1, keepdim=True)
             mix = mix / (self.floor + std)
         else:
             std = 1
-        length = mix.shape[-1]
+        # length = mix.shape[-1]
         x = mix
-        x = F.pad(x, (0, self.valid_length(length) - length))
+        # x = F.pad(x, (0, self.valid_length(length) - length)) #222 (before: 81271)
         if self.resample == 2:
             x = upsample2(x)
         elif self.resample == 4:
@@ -175,12 +177,16 @@ class Demucs(nn.Module):
         for encode in self.encoder:
             x = encode(x)
             skips.append(x)
-        x = x.permute(2, 0, 1)
-        x, _ = self.lstm(x)
-        x = x.permute(1, 2, 0)
+        # x = x.permute(2, 0, 1)
+        # x, _ = self.lstm(x)
+        # x = x.permute(1, 2, 0)
         for decode in self.decoder:
             skip = skips.pop(-1)
-            x = x + skip[..., :x.shape[-1]]
+            # assert x.shape == skip.shape
+            # x = x + skip[..., : x.shape[-1]]
+            # skip = F.pad(skip, (0, x.detach().numpy().shape[-1] - skip.detach().numpy().shape[-1]))
+
+            x = x + skip
             x = decode(x)
         if self.resample == 2:
             x = downsample2(x)
@@ -188,7 +194,7 @@ class Demucs(nn.Module):
             x = downsample2(x)
             x = downsample2(x)
 
-        x = x[..., :length]
+        # x = x[..., :length]
         return std * x
 
 
