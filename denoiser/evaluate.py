@@ -126,7 +126,8 @@ def evaluate(args, model=None, data_loader=None):
     import numpy as np
 
     inp = torch.from_numpy(np.random.random((1,1,model.valid_length(length)))).float()
-    out1 = coreml_model.predict({"0": inp.numpy()})["138"]
+    out1 = coreml_model.predict({"0": inp.numpy()})
+    out1 = list(out1.values())[0]
     out2 = model(inp)
     np.testing.assert_array_almost_equal(out1.squeeze(), out2.detach().numpy().squeeze())
 
